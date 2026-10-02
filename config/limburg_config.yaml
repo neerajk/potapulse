@@ -1,0 +1,231 @@
+# Limburg module - standalone pipeline mirroring NDWI/'s pattern, extended
+# with a Sentinel-1 SAR water-detection branch and a seed-potato overlap step.
+# Independent of the main br_simulation pipeline and of NDWI/ (own boundary,
+# own plots, own caches) - the two provinces are fetched separately.
+
+aoi:
+  crs: "EPSG:28992"   # Dutch RD New
+
+region:
+  province: "Limburg"
+  # PDOK "BRK Bestuurlijke Gebieden" OGC API Features, collection "provinciegebied".
+  # Same endpoint family as br_simulation's Groningen config (config/config.yaml) -
+  # verified live 2026-10-02 for Limburg: naam=Limburg -> code=31.
+  province_ogc_api_base: "https://api.pdok.nl/kadaster/brk-bestuurlijke-gebieden/ogc/v1"
+  province_collection: "provinciegebied"
+  province_name_field: "naam"
+  province_code_field: "code"
+  province_expected_code: "31"   # Limburg = PV31, confirmed live against a real /items response
+
+seed_potato_plots:
+  # Live PDOK BRP Gewaspercelen fetch - same Atom feed / full-NL GeoPackage /
+  # pushed-down bbox+gewascode filter as br_simulation's seed_plots.py.
+  atom_feed_url: "https://service.pdok.nl/rvo/gewaspercelen/atom/basisregistratie_gewaspercelen_brp.xml"
+  gpkg_entry_id: "https://service.pdok.nl/rvo/gewaspercelen/atom/basisregistratie_gewaspercelen_brp_epsg28992_geopackage.xml"
+  concept_year: 2026
+  cache_dir: "limburg/data/raw/brp_cache"
+  min_plausible_area_m2: 1.0
+  # Same NAK/TBM seed-potato gewascodes as the Groningen config (both are
+  # "Akkerbouwgewas, pootaardappelen"; NAK/TBM is a certification-status split,
+  # not a different crop) - verified against rvo.nl/gewascodes/<code>.
+  gewascodes:
+    2015:
+      gewas: "Aardappelen, poot NAK"
+      category_label: "seed_nak"
+    2016:
+      gewas: "Aardappelen, poot TBM"
+      category_label: "seed_tbm"
+
+sentinel2:
+  # Element84 Earth Search STAC over the public AWS Sentinel-2 L2A COG archive -
+  # same endpoint as NDWI/config/ndwi_config.yaml, no authentication required.
+  stac_endpoint: "https://earth-search.aws.element84.com/v1"
+  collection: "sentinel-2-l2a"
+  date_range: "2025-08-01/2025-09-30"   # Aug-Sep 2025, end of growing season
+  max_cloud_cover: 20
+  green_asset: "green"   # B03, 10m
+  nir_asset: "nir"       # B08, 10m
+  scl_asset: "scl"       # scene classification, 20m native - cloud/shadow masking
+  # True-color composite (TCI, R/G/B uint8, 10m) - confirmed live 2026-10-02
+  # against this same STAC endpoint's item assets. Used only for the plain
+  # true-color overview panel (visualize_overview.py); NDWI math above never
+  # touches this asset.
+  visual_asset: "visual"
+  # SCL classes masked before computing NDWI (official S2 SCL legend): 3=cloud
+  # shadow, 8/9=cloud medium/high probability, 10=thin cirrus.
+  scl_mask_classes: [3, 8, 9, 10]
+  # McFeeters (1996) NDWI = (green - nir) / (green + nir); pixels above this
+  # threshold are classified as open water (the standard 0.0 cutoff).
+  ndwi_water_threshold: 0.0
+
+sentinel1:
+  # Microsoft Planetary Computer STAC. Verified live 2026-10-02: the SAS-signing
+  # endpoint (/api/sas/v1/sign) signs "sentinel-1-grd" assets anonymously, no
+  # subscription key needed (unlike "sentinel-1-rtc", which PC's own docs say
+  # requires a registered account - avoided here for that reason).
+  stac_endpoint: "https://planetarycomputer.microsoft.com/api/stac/v1"
+  collection: "sentinel-1-grd"
+  date_range: "2025-08-01/2025-09-30"   # same Aug-Sep 2025 window as Sentinel-2
+  instrument_mode: "IW"
+  vv_asset: "vv"
+  vh_asset: "vh"
+  calibration_vv_asset: "schema-calibration-vv"
+  calibration_vh_asset: "schema-calibration-vh"
+  # Minimum fraction of the province's area the selected scene(s) must cover
+  # before the greedy coverage search gives up and uses what it has.
+  min_coverage_fraction: 0.99
+  # SAR surface-water detection via Otsu (1979) automatic thresholding on
+  # calibrated VV sigma0 (dB) - water's specular backscatter is markedly lower
+  # than vegetated/bare land, producing the bimodal histogram Otsu's method
+  # assumes. This is the same backscatter-thresholding approach documented for
+  # Sentinel-1 flood/water mapping in Martinis et al. (2015), Remote Sensing,
+  # "A Fully Automated TerraSAR-X Based Flood Service" (method generalized to
+  # Sentinel-1 VV in later ESA/Copernicus EMS SAR flood-mapping guidance).
+  water_detection_band: "vv"
+  # SAR backscatter has strong multiplicative speckle noise (coherent imaging
+  # artifact, not a sensor flaw) - thresholding raw per-pixel dB values before
+  # despeckling produces hundreds of thousands of spurious single-pixel
+  # "water" blobs. A median filter is the standard cheap despeckling baseline
+  # (a full adaptive Lee/Refined-Lee filter would preserve edges better but is
+  # out of scope here); applied to VV dB before Otsu thresholding.
+  speckle_filter_size_px: 5
+  # Binary opening removes residual isolated noise pixels after thresholding;
+  # closing fills small gaps/holes inside real water bodies. Both standard
+  # post-processing steps in SAR flood-mapping pipelines (e.g. Copernicus EMS).
+  morphology_struct_size_px: 3
+  # Minimum mapping unit - water polygons smaller than this (post-despeckle,
+  # post-morphology) are still dropped before the plot-overlap analysis, as a
+  # second line of defense against noise-driven false-positive overlaps.
+  min_water_body_area_m2: 1000
+
+data_sources:
+  ahn4_dtm:
+    # PDOK's AHN WCS - confirmed live 2026-10-02 via GetCapabilities that only
+    # two coverages are published (dtm_05m, dsm_05m); no "ahn5" coverage id and
+    # no separate AHN5 WCS endpoint exists yet. AHN4 dtm_05m is therefore the
+    # best/only live-fetchable DTM option - re-check GetCapabilities and update
+    # coverage_id if/when PDOK publishes an AHN5 coverage.
+    wcs_url: "https://service.pdok.nl/rws/ahn/wcs/v1_0"
+    coverage_id: "dtm_05m"
+    native_resolution_m: 0.5
+    # DescribeCoverage's gml:Envelope for dtm_05m, confirmed live 2026-10-02
+    # (EPSG:28992): requests are clipped to this before being sent, since a
+    # subset that pokes outside it comes back as a hard WCS error rather than
+    # a partially-filled response.
+    coverage_bounds_28992: [10000, 306250, 280000, 618750]
+    # The native 0.5m product would be 100s of GB for all of Limburg (~2200
+    # km^2) - impractical for an overview figure (see
+    # src/br_simulation/visualization/province_overview.py's docstring on the
+    # same issue for Groningen). Each tile is instead requested already
+    # downsampled via the WCS's Scaling extension (SCALEFACTOR=native/target) -
+    # confirmed live 2026-10-02 that this WCS advertises and honors it
+    # (ows:Profile .../WCS_service-extension_scaling/1.0/conf/scaling): a
+    # 20km x 20km subset at SCALEFACTOR=0.05 returns a 2000x2000px 10m/px tiff.
+    overview_resolution_m: 10
+    # Resolution used by netherlands_dtm.py's whole-country fetch (a separate,
+    # standalone script from the Limburg-only pipeline above). 10m/px over the
+    # full coverage_bounds_28992 extent (~270km x 312.5km) would mosaic to
+    # ~27000x31000px; 50m/px keeps the merged array a manageable ~5400x6250px
+    # while still tiling comfortably under the WCS's MAXSIZE=4000px/axis cap
+    # (180km/tile at 50m/px -> 3600px/axis).
+    netherlands_overview_resolution_m: 50
+
+  copernicus_dem_eea10:
+    # Copernicus Data Space Ecosystem (CDSE) STAC - confirmed live 2026-10-02
+    # via https://catalogue.dataspace.copernicus.eu/stac/collections that
+    # "cop-dem-eea-10-laea-tif" is the only EEA-10 (10m, Europe-only) DEM
+    # collection; GLO-30/GLO-90 are separate lower-res collections. This is
+    # ESA Copernicus Contributing Missions (CCM) data under its own license
+    # (linked from the collection's STAC metadata) - unlike GLO-30, it is NOT
+    # on the open, anonymous AWS archive, so downloading tiles requires a free
+    # CDSE account.
+    stac_endpoint: "https://stac.dataspace.copernicus.eu/v1"
+    collection: "cop-dem-eea-10-laea-tif"
+    # Password-grant OAuth2 against CDSE's public client (no client secret) -
+    # standard documented CDSE auth flow. Set CDSE_USERNAME/CDSE_PASSWORD env
+    # vars before running fetch_copernicus_dem_eea10.py.
+    token_url: "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
+    client_id: "cdse-public"
+    # Despite the "-laea-tif" collection name, distributed tiles are EPSG:4326
+    # one-degree cells (confirmed live via item properties["proj:code"]),
+    # grid:code formatted "CDEM-N50E006" etc. A bbox search against this
+    # collection also returns (a) multiple reprocessing versions of the same
+    # cell and (b) differently-gridded duplicate entries with non-conforming
+    # grid:code width (confirmed live 2026-10-02, e.g. "CDEM-N30E39" alongside
+    # the standard "CDEM-N50E006") - both filtered out before download, see
+    # _select_canonical_items in fetch_copernicus_dem_eea10.py.
+    grid_code_pattern: "^CDEM-[NS]\\d{2}[EW]\\d{3}$"
+
+  hoogte_nederland_dtm:
+    # PDOK WCS backing data.overheid.nl dataset #38665 ("Hoogte - Land 1 mtr
+    # - Digital Terrain Model (DTM) - AHN, INSPIRE Geharmoniseerd") -
+    # resolved from that dataset page via its linked Nationaal Georegister
+    # metadata record (uuid 6a1c46ee-30ed-4e5e-89b7-6b12b8bc71bf) to this WCS
+    # endpoint, confirmed live 2026-10-02. A *different* product/service
+    # from ahn4_dtm above (same underlying AHN survey, but this is its
+    # INSPIRE-harmonized "land DTM" distribution): coverage "El.GridCoverage",
+    # ~1m native pixels, native CRS EPSG:4258 (ETRS89 lat/lon), MapServer-
+    # backed WCS 2.0.1.
+    wcs_url: "https://service.pdok.nl/rws/hoogte-nederland-land-dtm/wcs/v1_0"
+    coverage_id: "El.GridCoverage"
+    native_resolution_m: 1.0
+    # Despite the native grid being geographic, GetCapabilities advertises -
+    # and a live GetCoverage request confirmed - EPSG:28992 works as both
+    # SUBSETTINGCRS and OUTPUTCRS, so requests/responses stay in the
+    # project's standard CRS with no separate reprojection step.
+    request_crs: "EPSG:28992"
+    # Downsampling target. Requested via the WCS scaling extension's
+    # SCALESIZE (explicit output width/height), not SCALEFACTOR - confirmed
+    # live that SCALEFACTOR applied against this service's native geographic
+    # grid produces non-square, non-round pixel sizes once reprojected to
+    # EPSG:28992 (8.85m x 14.09m for a SCALEFACTOR nominally aiming at 10m),
+    # whereas SCALESIZE computed directly in the output resolution gives
+    # exact 10.0m x 10.0m pixels.
+    overview_resolution_m: 10
+
+waterways:
+  # HDX/HOTOSM "Waterways of Netherlands" export (OpenStreetMap, ODbL) -
+  # confirmed live 2026-10-02 via HDX's CKAN API (package_show for
+  # hotosm_nld_waterways, https://data.humdata.org/dataset/hotosm_nld_waterways)
+  # that this public, no-auth S3 object is the SHP resource
+  # (202,485,681 bytes). Confirmed via the zip's own central directory that
+  # it bundles three layers (waterways_points/_lines/_polygons); _lines is
+  # used here (235,098 features nationwide) since it carries OSM's
+  # waterway=* tag (river/stream/canal/ditch/drain/...) - _polygons is water
+  # *bodies* (lakes/ponds, water=*/natural=water), a different thing.
+  shp_zip_url: "https://production-raw-data-api.s3.amazonaws.com/ISO3/NLD/waterways/hotosm_nld_waterways_osm_shp.zip"
+  shp_zip_size_bytes: 202485681
+  lines_layer: "waterways_lines"
+  # Confirmed live via the shapefile's own .prj - standard for OSM/HOT
+  # exports, never reprojected by HOT.
+  source_crs: "EPSG:4326"
+  # Distance within which a waterway is treated as a plausible surface-water
+  # exposure pathway for a seed potato plot. No authoritative NL-specific
+  # standard is cited for this figure - it's a placeholder scale (same order
+  # of magnitude as typical NL agricultural parcel/ditch spacing) - tune via
+  # this config value, not a hardcoded constant in the script.
+  buffer_distance_m: 50
+
+dtm_burn:
+  # Input: limburg/standalone/download_limburg_dtm.py's 5m AHN DTM output
+  # (python limburg/standalone/download_limburg_dtm.py --province Limburg
+  # --res 5, run from the repo root with its default --out ".") - path
+  # relative to REPO_ROOT.
+  source_dtm_path: "limburg_ahn_dtm_5m.tif"
+  target_resolution_m: 10
+  # Fixed-depth "ditch burning" - a simplified version of the AGREE method
+  # (Hellweger 1997, used throughout DEM-hydrology preprocessing) for
+  # forcing known drainage channels to stay represented as low points once
+  # a DEM is coarsened, rather than being smoothed away. No site survey
+  # backs this number - it's a placeholder on the order of a typical NL
+  # farm ditch depth; tune via this config value, not a hardcoded constant
+  # in the script.
+  burn_depth_m: 1.0
+
+paths:
+  raw_dir: "limburg/data/raw"
+  processed_dir: "limburg/data/processed"
+  figures_dir: "limburg/outputs/figures"
+
+visualization:
+  dpi: 300

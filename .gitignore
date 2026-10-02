@@ -1,0 +1,31 @@
+# Scoped to this folder - rules below are rooted at limburg/, so no need
+# for repo-root-relative paths.
+
+__pycache__/
+*.pyc
+
+# Fetched/derived data - regeneratable from config + the fetch/*.py modules,
+# not worth versioning (easily GB-scale: AHN4 tiles, Sentinel scenes, the
+# HOTOSM waterways zip, every mosaic/clip/gpkg).
+data/raw/*
+data/interim/*
+data/processed/*
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+
+# Figures - regeneratable by re-running the relevant visualize/*.py or
+# process/*.py step.
+outputs/figures/*
+outputs/results/*
+!outputs/figures/.gitkeep
+!outputs/results/.gitkeep
+
+# standalone/download_limburg_dtm.py's own tile cache and its default
+# (--out ".") output files - named after whatever --province was passed, so
+# these are globs rather than one fixed filename.
+.ahn_cache/
+*_ahn_dtm_*.tif
+*_ahn_dsm_*.tif
+*_ahn_boundary.gpkg
+*_ahn_*_manifest.json
