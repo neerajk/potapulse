@@ -3,6 +3,7 @@
 
 __pycache__/
 *.pyc
+.DS_Store
 
 # Fetched/derived data - regeneratable from config + the fetch/*.py modules,
 # not worth versioning (easily GB-scale: AHN4 tiles, Sentinel scenes, the
@@ -15,11 +16,29 @@ data/processed/*
 !data/processed/.gitkeep
 
 # Figures - regeneratable by re-running the relevant visualize/*.py or
-# process/*.py step.
+# process/*.py step. Exceptions: the handful the README embeds, kept
+# versioned so the README renders on GitHub without anyone running the
+# pipeline first.
 outputs/figures/*
 outputs/results/*
 !outputs/figures/.gitkeep
 !outputs/results/.gitkeep
+!outputs/results/exposure_risk_limburg.csv
+!outputs/figures/00_seed_plots.png
+!outputs/figures/01_baseline_water_overlap.png
+!outputs/figures/02_waterways.png
+!outputs/figures/03_dem_burn.png
+!outputs/figures/04_bofek_soil.png
+!outputs/figures/05_discharge.png
+!outputs/figures/06_exposure_risk_map.png
+!outputs/figures/07_montecarlo_simulation.gif
+!outputs/figures/08_scenario_1.gif
+!outputs/figures/08_scenario_1_flood_extent.png
+
+# BOFEK2020 soil map is a third-party static dataset (Wageningen
+# Environmental Research / WUR) the user supplies manually - not fetched by
+# any fetch/*.py module, not ours to redistribute.
+data/BOFEK_2020_Shape.zip
 
 # standalone/download_limburg_dtm.py's own tile cache and its default
 # (--out ".") output files - named after whatever --province was passed, so

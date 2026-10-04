@@ -225,7 +225,129 @@ dtm_burn:
 paths:
   raw_dir: "limburg/data/raw"
   processed_dir: "limburg/data/processed"
+  interim_dir: "limburg/data/interim"
   figures_dir: "limburg/outputs/figures"
+  results_dir: "limburg/outputs/results"
 
 visualization:
   dpi: 300
+
+# --- Layer 0-3: origin-dependent flood-exposure routing ---------------------
+
+bofek2020:
+  # Static local layer, already present - no download. Confirmed schema (read
+  # directly against the real Limburg-clipped data, not assumed): columns
+  # OBJECTID_1, SHAPE_LENG, SHAPE_AREA, BOFEK2020 (map-unit code, null for
+  # ~9% of polygons e.g. open water), OMSCHR (Dutch free-text description),
+  # CRS EPSG:28992. 3,344 polygons intersect Limburg; real OMSCHR values
+  # confirmed present include "Kleigronden (zavel en lichte klei)...",
+  # "Leemgronden: zandige leem...", "Zwak/Sterk lemige zandgronden...",
+  # "Dunne veengronden...", "Kalksteenverweringsgronden" (South Limburg loess).
+  shapefile_zip_path: "limburg/data/BOFEK_2020_Shape.zip"
+  shp_name: "BOFEK_2020.shp"
+  code_field: "BOFEK2020"
+  description_field: "OMSCHR"
+
+pdok_aerial:
+  # PDOK "Actueel_orthoHR" WMTS - national 8cm/px RGB aerial orthophoto.
+  # GDAL's generic WMTS driver (`WMTS:<capabilities_url>,layer=...`) was
+  # tried first and killed after ~100s/1.2GB with no output, even before
+  # issuing a read - it appears to eagerly materialize something for the
+  # full tile pyramid (134M x 134M px at native zoom) regardless of how
+  # small the actual requested window is. Fetching individual REST tiles
+  # directly instead, via the ResourceURL template confirmed live in
+  # GetCapabilities - simpler, and only ever touches the handful of tiles a
+  # given crop actually needs.
+  #
+  # Only ever used for TIGHT, SPECIFIC crops (Step 6's exposed-plot detail
+  # panels, the scenario GIFs) - never at province scale. Zoom level 15
+  # alone is a 32768x32768 tile matrix; the whole country at this
+  # resolution would be multiple billion pixels.
+  resource_url_template: "https://service.pdok.nl/hwh/luchtfotorgb/wmts/v1_0/Actueel_orthoHR/EPSG:28992/{level}/{col}/{row}.jpeg"
+  # TileMatrixSet "EPSG:28992" origin + level-0 scale denominator, confirmed
+  # live from GetCapabilities (not assumed) - resolution at level L is
+  # (12288000.0 * 0.00028) / 2^L meters/px, per the OGC WMTS scale-denominator
+  # convention (0.28mm reference pixel size).
+  topleft_x: -285401.92
+  topleft_y: 903401.92
+  scale_denominator_level0: 12288000.0
+  tile_px: 256
+  # Tried zoom 15 (0.105 m/px, closest to the source's true 8cm native
+  # resolution) first - a single exposed-plot detail crop (~500m across at
+  # the buffer_m used) needs ~360 tiles at that resolution; fetching that
+  # many one at a time left even the first output figure unfinished after
+  # 1000+ tiles (confirmed live, not assumed slow). Zoom 13 (0.42 m/px) cuts
+  # tile count ~16x for the same crop while still being ~24x sharper than
+  # the 10m Sentinel-2 mosaic it replaces - still genuinely "aerial photo"
+  # detail, not just a resolution number.
+  zoom_level: 13   # resolution = 0.42 m/px
+  max_parallel_fetches: 16   # tiles within one crop are fetched concurrently
+                               # (network-bound) - sequential fetching is what
+                               # made zoom 15 impractically slow above
+  cache_dir: "limburg/data/raw/pdok_aerial_cache"
+
+runoff:
+  # Rational Method (Q = C*i*A). Per-cell C comes from BOFEK2020's OMSCHR
+  # text, keyword-matched to a texture class (network/soil_params.py) - NOT
+  # a sourced Curve-Number crosswalk (none exists for BOFEK2020's map-unit
+  # codes - the shapefile carries no hydraulic fields). The class ORDER
+  # (sand infiltrates more than loam, more than clay/peat) is standard
+  # textbook soil hydrology (the same ordering as SCS/NRCS hydrologic soil
+  # groups A-D); the specific coefficient VALUES below are uncalibrated
+  # placeholders, not a Limburg-specific study result.
+  #
+  # Matched on the COMPOUND leading term ("kleigronden", not bare "klei"),
+  # checked in the order listed, first match by position in the string wins.
+  # Verified against real Limburg OMSCHR text that this correctly classifies
+  # mixed-profile descriptions by their governing genetic class rather than a
+  # mentioned subsoil - e.g. "Kleigronden (zavel) op zandondergrond" (a clay
+  # soil whose SUBSOIL is sand) must classify as klei, not zand; bare
+  # substring matching on "zand" would get this wrong since "zandondergrond"
+  # appears later in the string. "moerige gronden" (mucky soils) is grouped
+  # with veengronden - both are organic/peaty genetic classes in BOFEK's
+  # own classification scheme, confirmed present in the real Limburg data.
+  texture_keywords:
+    - ["kleigronden", "klei"]
+    - ["leemgronden", "leem"]
+    - ["zandgronden", "zand"]
+    - ["veengronden", "veen"]
+    - ["moerige gronden", "veen"]
+  texture_coefficients:
+    zand: 0.20
+    leem: 0.35
+    klei: 0.50
+    veen: 0.45
+  runoff_coefficient_default: 0.30   # fallback: null code, or OMSCHR matches no keyword
+                                       # (e.g. "Kalksteenverweringsgronden", open water)
+
+routing:
+  # Simple travel-time lag: distance / assumed_velocity_m_s. Not sourced
+  # from a measured Limburg ditch-flow reference.
+  assumed_velocity_m_s: 0.3
+
+capacity_constraints:
+  # No verified per-structure culvert capacity rating exists for any Limburg
+  # waterschap - a single uniform placeholder threshold (m^3/s) is applied
+  # everywhere until one is sourced.
+  default_capacity_m3_s: 0.5
+
+scenario_grid:
+  intensity_bins_mm_hr: [10, 20, 30, 40, 60, 80]
+  duration_bins_min: [30, 60, 120, 240]
+  out_of_grid_policy: "error"
+  cache_dir: "limburg/data/processed/layer1_cache"
+
+dashboard:
+  sliders:
+    intensity_mm_hr: {min: 10, max: 80, default: 30, step: 10}
+    duration_min: {min: 30, max: 240, default: 60, step: 30}
+    time_window_min: {min: 15, max: 720, default: 120, step: 15}
+  monte_carlo:
+    n_draws_live: 200
+    random_seed: 42
+    gif_search_draws: 500    # random origins searched to find the most
+                              # illustrative scenarios (most plots exposed in
+                              # one draw; longest flow path) - cheap, ~1500/s
+    gif_n_scenarios: 4        # dedicated GIFs to generate from that search
+    gif_time_frames: 20       # frames per scenario GIF (time-progression,
+                              # not one-frame-per-draw)
